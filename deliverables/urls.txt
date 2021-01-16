@@ -1,0 +1,5 @@
+https://github.com/chaitra2090/Udacity-Auto-Deploy-Superpowers
+http://udapeople-87c4df2.s3-website-us-west-2.amazonaws.com/#/employees
+d3fkykjcsb3sy4.cloudfront.net
+http://ec2-34-216-165-166.us-west-2.compute.amazonaws.com:3030/api/status
+http://ec2-52-38-71-172.us-west-2.compute.amazonaws.com:9090/graph
