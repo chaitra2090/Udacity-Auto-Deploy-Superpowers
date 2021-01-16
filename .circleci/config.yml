@@ -1,0 +1,449 @@
+version: 2.1
+
+commands:
+  destroy-environment:
+    description: Destroy back-end and front-end cloudformation stacks given a workflow ID.
+    parameters:
+    steps:
+      - run:
+          name: Destroy all environments
+          when: on_fail
+          command: |
+            aws cloudformation delete-stack --stack-name backend-${CIRCLE_WORKFLOW_ID:0:7}
+            aws cloudformation delete-stack --stack-name frontend-${CIRCLE_WORKFLOW_ID:0:7}
+            aws s3 rm s3://udapeople-${CIRCLE_WORKFLOW_ID:0:7} --recursive
+
+jobs:
+  build-frontend:
+    docker:
+        - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Install dependencies
+          command: |
+            cd frontend
+            npm install
+      - run:
+          name: Build front-end
+          command: |
+            cd frontend
+            npm run build
+            cd dist
+            ls
+      - save_cache:
+          paths: [frontend/node_modules]
+          key: frontend-build
+
+  build-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Install dependencies
+          command: |
+            cd backend
+            npm install
+      - run:
+          name: Back-end build
+          command: |
+             cd backend
+             npm run build
+      - save_cache:
+          paths: [backend/node_modules]
+          key: backend-build
+
+  test-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run: |
+          cd frontend
+          npm i
+          npm run test
+
+  test-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run: |
+          cd backend
+          npm i
+          npm run test
+
+  scan-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run: |
+          cd frontend
+          npm audit fix --audit-level=critical --force
+
+  scan-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run: |
+          cd backend
+          npm audit fix --audit-level=critical --force
+
+  deploy-infrastructure:
+    docker:
+      - image: amazon/aws-cli:latest
+    steps:
+      - checkout
+      - run:
+          name: Ensure back-end infrastructure exists
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/backend.yml \
+              --tags project=backend-project3 \
+              --stack-name backend-${CIRCLE_WORKFLOW_ID:0:7} \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}"
+      - run:
+          name: save backend public dns name
+          #when: on_success
+          command: |
+            BACKEND_DNS_NAME=$(aws --region us-west-2 ec2 describe-instances \
+              --filters "Name=tag:Name,Values=backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --output text \
+              --query 'Reservations[*].Instances[*].PublicDnsName')
+            curl -H "Content-Type: text/plain" -H "token: 039715d6-67eb-4820-9a22-adb63030726a" \
+              --request PUT --data "$BACKEND_DNS_NAME" https://api.memstash.io/values/backend_dns_name
+      - run:
+          name: Ensure front-end infrastructure exist
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/frontend.yml \
+              --tags project=frontend-project3 \
+              --stack-name "frontend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}"
+      - destroy-environment
+
+  save-variables-to-ansible-inventory:
+    docker:
+      - image: python:3.7-alpine3.11
+    steps:
+      - checkout
+      - run:
+          name: install tar
+          command: apk add curl
+      - run:
+          name: save backend dns name to ansible inventory
+          command: |
+            BACKEND_DNS_NAME=`curl -H "token: 039715d6-67eb-4820-9a22-adb63030726a" --request GET https://api.memstash.io/values/backend_dns_name`
+            echo "[web]" > /home/inventory.txt
+            echo "$BACKEND_DNS_NAME" >> /home/inventory.txt
+            cat /home/inventory.txt
+      - run:
+          name: install tar
+          command: apk add tar
+
+      - persist_to_workspace:
+          root: /home/
+          paths:
+            - inventory.txt
+
+
+  configure-infrastructure:
+    docker:
+      - image: python:3.7-alpine3.11
+      - image: circleci/postgres:9.6.2-alpine
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: glee
+          POSTGRES_PASSWORD: password
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /home/
+      - add_ssh_keys:
+          fingerprints:
+            - "ac:40:5d:11:02:0d:87:89:d7:f9:97:2b:8e:af:8e:dd"
+      - run:
+          name: install ansible
+          command: apk add ansible
+      - run:
+          name: install curl and export env variables
+          command: |
+            apk add curl
+            TYPEORM_HOST="localhost"
+            export TYPEORM_HOST
+            TYPEORM_PORT=5432
+            export TYPEORM_PORT
+            TYPEORM_USERNAME="postgres"
+            export TYPEORM_USERNAME
+            TYPEORM_PASSWORD="password"
+            export TYPEORM_PASSWORD
+            TYPEORM_DATABASE=glee
+            export TYPEORM_DATABASE
+            TYPEORM_CONNECTION="postgres"
+            export TYPEORM_CONNECTION
+            TYPEORM_MIGRATIONS_DIR="./src/migrations"
+            export TYPEORM_MIGRATIONS_DIR
+            TYPEORM_ENTITIES="./src/modules/domain/**/*.entity.ts"
+            export TYPEORM_ENTITIES
+            TYPEORM_MIGRATIONS="./src/migrations/*.ts"
+            export TYPEORM_MIGRATIONS
+      - run:
+          name: configure server
+          command: ansible-playbook -i /home/inventory.txt .circleci/ansible/configure-server.yml
+
+  deploy-frontend:
+    docker:
+      - image: python:3.7-alpine3.11
+    steps:
+      - checkout
+      - run:
+          name: retrieve backend_dns_name from memstash
+          command: |
+            pwd
+            apk add curl
+            apk add --no-cache python3 py3-pip
+            pip3 install --upgrade pip
+            pip3 install awscli
+            BACKEND_IP=`aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --output text`
+            API_URL=http://$BACKEND_IP:3030
+            export API_URL=http://$BACKEND_IP:3030
+            echo "API_URL=$API_URL" >> frontend/.env
+            cat frontend/.env
+            echo $API_URL
+      - run:
+          name: build frontend
+          command: |
+            apk add npm
+            cd frontend
+            npm install
+            npm run build
+      - run:
+          name: copy frontedn/dist to S3 bucket
+          command: |
+            apk add --no-cache python3 py3-pip
+            pip3 install --upgrade pip
+            pip3 install awscli
+            aws s3 cp frontend/dist s3://udapeople-${CIRCLE_WORKFLOW_ID:0:7} --recursive
+      - destroy-environment
+
+  deploy-backend:
+    docker:
+      - image: python:3.7-alpine3.11
+      - image: circleci/postgres:9.6.2-alpine
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: glee
+          POSTGRES_PASSWORD: password
+    steps:
+      - checkout
+      #- run: dockerize -wait tcp://localhost:5432 -timeout 1m
+      - add_ssh_keys:
+          fingerprints:
+            - "ac:40:5d:11:02:0d:87:89:d7:f9:97:2b:8e:af:8e:dd"
+      - attach_workspace:
+          at: /home
+      - run:
+          name: install packages
+          command: |
+            apk add --no-cache python3 py3-pip
+            pip3 install --upgrade pip
+            pip3 install awscli
+            apk add curl
+            apk add ansible
+            ls /home
+            cat /home/inventory.txt
+      - run:
+          name: run ansible script
+          command: |
+            cd backend
+            TYPEORM_HOST="localhost"
+            export TYPEORM_HOST
+            TYPEORM_PORT=5432
+            export TYPEORM_PORT
+            TYPEORM_USERNAME="postgres"
+            export TYPEORM_USERNAME
+            TYPEORM_PASSWORD="password"
+            export TYPEORM_PASSWORD
+            TYPEORM_DATABASE=glee
+            export TYPEORM_DATABASE
+            TYPEORM_CONNECTION="postgres"
+            export TYPEORM_CONNECTION
+            TYPEORM_MIGRATIONS_DIR="./src/migrations"
+            export TYPEORM_MIGRATIONS_DIR
+            TYPEORM_ENTITIES="./src/modules/domain/**/*.entity.ts"
+            export TYPEORM_ENTITIES
+            TYPEORM_MIGRATIONS="./src/migrations/*.ts"
+            export TYPEORM_MIGRATIONS
+
+            apk add npm
+            npm install
+            npm run build
+            cd ..
+            ansible-playbook -i /home/inventory.txt .circleci/ansible/deploy-backend.yml
+      - destroy-environment
+
+  smoke-test:
+    docker:
+      - image: python:3.7-alpine3.11
+    environment:
+      ID: arns3
+    steps:
+      - checkout
+      - run:
+          name: install packages
+          command: |
+            apk add curl
+            apk add --no-cache python3 py3-pip
+            pip3 install --upgrade pip
+            pip3 install awscli
+      - run:
+          name: smoke test for backend.
+          command: |
+            BACKEND_IP=`aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --output text`
+            curl "http://${BACKEND_IP}:3030/api/status"
+      - run:
+          name: smoke test for frontend
+          command: |
+            FRONTEND_URL="https://udapeople-${CIRCLE_WORKFLOW_ID:0:7}.s3-us-west-2.amazonaws.com/index.html"
+            if curl -s ${FRONTEND_URL} | grep "Welcome"
+              then
+                return 0
+              else
+                return 1
+            fi
+      - destroy-environment
+
+
+  cloudfront-update:
+    docker:
+      - image: amazon/aws-cli:latest
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints:
+            - "ac:40:5d:11:02:0d:87:89:d7:f9:97:2b:8e:af:8e:dd"
+      - run:
+          name: Update Cloudfront distribution
+          command: |
+            export OldWorkflowID=$(aws cloudformation list-exports --query "Exports[?Name=='WorkflowID'].Value" --no-paginate --output text)
+            echo Old Workflow Id: "${OldWorkflowID}"
+            if [ -n "${OldWorkflowID}" ]
+            then
+              aws cloudformation update-stack \
+                --template-body file://./.circleci/files/cloudfront.yml \
+                --stack-name cloudfront-udapeople \
+                --parameters ParameterKey=WorkflowID,ParameterValue=${CIRCLE_WORKFLOW_ID:0:7}
+            else
+              aws cloudformation create-stack \
+                --template-body file://./.circleci/files/cloudfront.yml \
+                --stack-name cloudfront-udapeople \
+                --parameters ParameterKey=WorkflowID,ParameterValue=${CIRCLE_WORKFLOW_ID:0:7}
+            fi
+      - destroy-environment
+
+  cleanup:
+    docker:
+      - image: amazon/aws-cli:latest
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints:
+            - "ac:40:5d:11:02:0d:87:89:d7:f9:97:2b:8e:af:8e:dd"
+      - run:
+          name: cleanup
+          command: |
+            export OldWorkflowID=$(aws cloudformation list-exports --query "Exports[?Name=='WorkflowID'].Value" --no-paginate --output text)
+            export STACKS=($(aws cloudformation list-stacks --query "StackSummaries[*].StackName" \
+              --stack-status-filter CREATE_COMPLETE --no-paginate --output text))
+            echo Old Workflow Id: "${OldWorkflowID}"
+            if [[ "${STACKS[@]}" =~ "${OldWorkflowID}" ]]
+            then
+              aws s3 rm "s3://udapeople-${OldWorkflowID}" --recursive
+              aws cloudformation delete-stack --stack-name "backend-${OldWorkflowID}"
+              aws cloudformation delete-stack --stack-name "frontend-${OldWorkflowID}"
+            fi
+      - destroy-environment
+
+
+
+
+
+workflows:
+  default:
+    jobs:
+      - build-frontend
+      - build-backend
+      - test-frontend:
+          requires: [build-frontend]
+      - test-backend:
+          requires: [build-backend]
+      - scan-backend:
+          requires: [build-backend]
+      - scan-frontend:
+          requires: [build-frontend]
+      - deploy-infrastructure:
+          requires: [test-frontend, test-backend, scan-frontend, scan-backend]
+          filters:
+            branches:
+              only:
+                - master
+      - save-variables-to-ansible-inventory:
+          requires: [deploy-infrastructure]
+          filters:
+            branches:
+              only:
+                - master
+      - configure-infrastructure:
+          requires: [deploy-infrastructure, save-variables-to-ansible-inventory]
+          filters:
+            branches:
+              only:
+                - master
+      - deploy-frontend:
+          requires: [configure-infrastructure]
+          filters:
+            branches:
+              only:
+                - master
+      - deploy-backend:
+          requires: [configure-infrastructure]
+          filters:
+            branches:
+              only:
+                - master
+      - smoke-test:
+          requires: [deploy-backend, deploy-frontend]
+          filters:
+            branches:
+              only:
+                - master
+      - cloudfront-update:
+          requires: [smoke-test]
+          filters:
+            branches:
+              only:
+                - master
+        #- cleanup:
+        #  requires: [cloudfront-update]
+        #  filters:
+        #    branches:
+        #      only:
+        #        - master
+
