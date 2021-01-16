@@ -109,6 +109,7 @@ jobs:
           name: Ensure back-end infrastructure exists
           command: |
             aws cloudformation deploy \
+              --region us-west-2 \
               --template-file .circleci/files/backend.yml \
               --tags project=backend-project3 \
               --stack-name backend-${CIRCLE_WORKFLOW_ID:0:7} \
@@ -127,6 +128,7 @@ jobs:
           name: Ensure front-end infrastructure exist
           command: |
             aws cloudformation deploy \
+              --region us-west-2 \
               --template-file .circleci/files/frontend.yml \
               --tags project=frontend-project3 \
               --stack-name "frontend-${CIRCLE_WORKFLOW_ID:0:7}" \
